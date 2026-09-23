@@ -45,9 +45,17 @@ _ROUTES_SNIPPET = (
     "print(json.dumps(d))"
 )
 
+# Every command reads the Docker daemon, so every command asserts it first.
+# Without this, a daemon that cannot be reached yields empty stdout and exit 0:
+# the command "succeeds" and reports nothing running, which an operator reads as
+# "nothing is deployed" rather than "I could not check". That silent-empty answer
+# is the exact shape of failure this server exists to catch — found on 2026-09-23
+# by running `deployed_images` against a machine whose Docker was stopped.
+_DOCKER_GUARD = 'docker info >/dev/null 2>&1 || { echo "cannot reach the Docker daemon on the target" >&2; exit 90; }\n'
+
 # The closed catalogue (FR-002). Scripts reach the target on stdin; the only
 # caller-supplied values are "$1" / "$2", validated before anything is spawned.
-COMMANDS: dict[str, str] = {
+_RAW_COMMANDS: dict[str, str] = {
     "overview": r"""
 echo "## host"; hostname; uname -sr; uptime
 echo "## disk"; df -h / 2>/dev/null | tail -1
@@ -117,6 +125,8 @@ done
 docker logs --tail "$2" "$1" 2>&1
 """,
 }
+
+COMMANDS: dict[str, str] = {name: _DOCKER_GUARD + script for name, script in _RAW_COMMANDS.items()}
 
 
 def validate_container(name: str) -> str:

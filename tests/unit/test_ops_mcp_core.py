@@ -96,6 +96,42 @@ def test_ningun_comando_del_catalogo_escribe() -> None:
             assert palabra not in script, f"{nombre} contiene {palabra!r}"
 
 
+def test_todo_comando_asegura_el_daemon_antes_de_preguntar() -> None:
+    """Cada comando lee Docker, así que cada comando lo afirma primero."""
+    for nombre, script in ops_core.COMMANDS.items():
+        assert script.startswith("docker info"), f"{nombre} no empieza por el guard"
+
+
+def test_sin_daemon_el_comando_falla_en_vez_de_contestar_vacio() -> None:
+    """Sin Docker, hay que fallar fuerte; "cero contenedores" es una mentira.
+
+    Encontrado el 2026-09-23 corriendo `deployed_images` contra una máquina con
+    Docker apagado: `for c in $(docker ps …)` itera cero veces, el script sale 0
+    y la herramienta contesta que no hay ningún contenedor. Un operador lee eso
+    como "no hay nada desplegado", no como "no pude chequear" — que es el mismo
+    vacío silencioso que este servidor existe para cazar.
+    """
+    import subprocess
+    import tempfile
+
+    # bash por ruta absoluta: el PATH que hereda el hijo está vacío a propósito,
+    # así que ahí adentro no hay `docker` — ni `bash` para encontrarse a sí mismo.
+    with tempfile.TemporaryDirectory() as path_sin_docker:
+        done = subprocess.run(
+            ["/bin/bash", "-s"],
+            input=ops_core.COMMANDS["deployed_images"],
+            capture_output=True,
+            text=True,
+            env={"PATH": path_sin_docker},
+        )
+
+    assert done.returncode != 0, (
+        "sin docker el comando salió 0: contestó vacío como si fuera un dato"
+    )
+    assert "cannot reach the Docker daemon" in done.stderr
+    assert done.stdout.strip() == ""
+
+
 @pytest.mark.parametrize(
     ("entrada", "secreto"),
     [

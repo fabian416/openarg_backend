@@ -1,7 +1,7 @@
 # Spec 028 — Ops MCP: reading what actually runs
 
 **Status**: Draft · **Owner**: backend
-**Last synced with code**: 2026-09-20
+**Last synced with code**: 2026-09-23
 **Supersedes nothing. Extends**: 009-monitoring, 012-admin
 
 ---
@@ -88,6 +88,12 @@ container, no application code imports it, and it adds no dependency to
   answer describes what is deployed and not what is checked out.
 - **FR-009**: Output MUST be capped (20,000 characters) and say so when it
   truncates.
+- **FR-010**: Every command MUST assert the Docker daemon is reachable before
+  reading anything, and MUST fail when it is not. An unreachable daemon otherwise
+  produces empty stdout and exit 0, so the tool answers "nothing is running" —
+  which reads as *nothing is deployed* rather than *I could not check*. Returning
+  a silent empty result in place of an error is the exact failure this server
+  exists to surface, so it may not be the server's own behaviour.
 
 ### Tools
 
@@ -113,6 +119,9 @@ container, no application code imports it, and it adds no dependency to
   tests on `redact()`.
 - **SC-004**: `make code.test` stays green without `mcp` installed: the tested
   module imports nothing outside the standard library.
+- **SC-005**: Run against a machine whose Docker is stopped, every tool raises
+  rather than reporting an empty environment. Covered by a unit test that pipes a
+  catalogue command to `bash` with an empty `PATH`.
 
 ---
 
