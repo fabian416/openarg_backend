@@ -31,18 +31,31 @@ KNOWN_QUEUES = (
     "s3",
 )
 
-# Runs inside a worker container. Same precedence as
-# tests/unit/test_celery_queues_have_consumers._colas_despachadas: the
-# `options.queue` of a beat entry overrides `task_routes`.
+# Runs inside a worker container. Emits {task: [queues]} — a LIST, because one
+# task can be dispatched to several queues and collapsing them hides orphans.
+#
+# `openarg.cleanup_orphan_temp_files` has three beat entries, one per collector
+# queue (PR #61). A `dict[task] = queue` keeps only the last one, so if the task
+# were scheduled on both a live queue and a dead one, whether the dead one is
+# reported would depend on dict order. Measured against staging on 2026-09-23:
+# the collapsing form reported 9 queues and hid `collector-heavy` entirely.
+#
+# Precedence is Celery's: a task with any beat entry is dispatched to that
+# entry's queue, which overrides `task_routes`; a task with no beat entry uses
+# `task_routes`. The override is per task, so all of its beat queues count.
 _ROUTES_SNIPPET = (
     "import json;"
     "from app.infrastructure.celery.app import celery_app as a;"
-    "d={t:r['queue'] for t,r in (a.conf.task_routes or {}).items()"
-    " if isinstance(r,dict) and r.get('queue')};"
-    "d.update({e['task']:(e.get('options') or {})['queue']"
+    "routes=[(t,r['queue']) for t,r in (a.conf.task_routes or {}).items()"
+    " if isinstance(r,dict) and r.get('queue')];"
+    "beat=[(e['task'],(e.get('options') or {})['queue'])"
     " for e in (a.conf.beat_schedule or {}).values()"
-    " if (e.get('options') or {}).get('queue')});"
-    "print(json.dumps(d))"
+    " if (e.get('options') or {}).get('queue')];"
+    "scheduled={t for t,_ in beat};"
+    "out={};"
+    "[out.setdefault(t,set()).add(q) for t,q in"
+    " [p for p in routes if p[0] not in scheduled]+beat];"
+    "print(json.dumps({t:sorted(q) for t,q in out.items()}))"
 )
 
 # Every command reads the Docker daemon, so every command asserts it first.
@@ -85,16 +98,36 @@ docker exec "$w" python -c """
         + '"'
         + "\n"
     ),
+    # Redis needs a password, and the target keeps it in one of two places.
+    # First choice is `REDIS_PASSWORD` inside the container, which never leaves
+    # it. Staging has no such env var — compose interpolates the password into
+    # `command:` — and redis-server rewrites its own argv to `redis-server
+    # *:6379`, so `/proc/1/cmdline` has lost it too. The fallback is Docker's
+    # own record of the command it was started with.
+    #
+    # Measured against staging on 2026-09-23: reading only the env var made
+    # every queue come back as `NOAUTH Authentication required`, printed in the
+    # column where a length goes. The password is held in a shell variable on
+    # the target and handed to the container as `-e RP`; it is never printed,
+    # and `redact()` would catch it if it ever reached the output.
     "queue_lengths": (
         r"""
 r="$(docker ps --format '{{.Names}}' | grep -i redis | sort | head -1)"
-[ -n "$r" ] || { echo "no running redis container"; exit 0; }
-for q in """
+[ -n "$r" ] || { echo "no running redis container" >&2; exit 91; }
+p="$(docker exec "$r" sh -c 'printf %s "${REDIS_PASSWORD:-}"')"
+[ -n "$p" ] || p="$(docker inspect --format '{{range .Config.Cmd}}{{println .}}{{end}}' "$r" | grep -A1 -x -- '--requirepass' | tail -1)"
+out="$(docker exec -e RP="$p" "$r" sh -c '
+  for q in """
         + " ".join(KNOWN_QUEUES)
         + r"""; do
-  n="$(docker exec "$r" sh -c 'redis-cli ${REDIS_PASSWORD:+-a "$REDIS_PASSWORD"} --no-auth-warning -n 0 LLEN '"$q" 2>/dev/null)"
-  printf '%s\t%s\n' "$q" "${n:-?}"
-done
+    printf "%s\t%s\n" "$q" "$(redis-cli ${RP:+-a "$RP"} --no-auth-warning -n 0 LLEN "$q")"
+  done
+')"
+echo "$out"
+case "$out" in
+  *NOAUTH*|*WRONGPASS*|*ERR*)
+    echo "redis refused the credentials found in the container" >&2; exit 92 ;;
+esac
 """
     ),
     "deployed_images": r"""
@@ -201,15 +234,29 @@ def parse_consumed_queues(worker_commands: str) -> dict[str, list[str]]:
 
 
 def find_orphan_routes(dispatched_json: str, consumed: dict[str, list[str]]) -> dict[str, object]:
-    """Tasks dispatched to a queue that no running container consumes (FR-008)."""
+    """Tasks dispatched to a queue that no running container consumes (FR-008).
+
+    `dispatched_json` maps a task to the LIST of queues it is dispatched to; a
+    task is reported once per dead queue, so a task scheduled on both a live and
+    a dead queue still surfaces.
+    """
     dispatched = json.loads(dispatched_json)
     if not isinstance(dispatched, dict) or "error" in dispatched:
         raise ValueError(f"could not read routes from the target: {dispatched_json.strip()[:200]}")
     live = {q for queues in consumed.values() for q in queues}
-    orphans = {task: queue for task, queue in dispatched.items() if queue not in live}
+    orphans = {
+        task: dead
+        for task, queues in dispatched.items()
+        if (dead := sorted(q for q in queues if q not in live))
+    }
     return {
         "consumed_queues": sorted(live),
-        "dispatched_queues": sorted(set(dispatched.values())),
+        "dispatched_queues": sorted({q for queues in dispatched.values() for q in queues}),
         "consumers": consumed,
         "orphan_routes": dict(sorted(orphans.items())),
+        # A queue with a worker but nothing routed to it: not a failure, but it
+        # means a container is paying for a queue nothing feeds.
+        "consumed_but_never_dispatched": sorted(
+            live - {q for queues in dispatched.values() for q in queues}
+        ),
     }

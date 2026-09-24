@@ -86,6 +86,21 @@ container, no application code imports it, and it adds no dependency to
   precedence (beat `options.queue` overrides `task_routes`), and consumed queues
   from the `-Q` of running containers. Both halves come from the target, so the
   answer describes what is deployed and not what is checked out.
+- **FR-008a**: A task MUST be reported against **every** queue it is dispatched
+  to, not one. `openarg.cleanup_orphan_temp_files` has three beat entries, one
+  per collector queue; a `task → queue` mapping keeps whichever the dict wrote
+  last, so a task scheduled on both a live and a dead queue can hide the dead
+  one, and which one survives depends on iteration order. Measured against
+  staging on 2026-09-23: the collapsing form reported nine queues and dropped
+  `collector-heavy` from the report entirely.
+- **FR-011**: `queue_lengths` MAY resolve the Redis password on the target —
+  `REDIS_PASSWORD` inside the container first, else the `--requirepass` argument
+  in Docker's record of the container's command. It MUST NOT print it, and MUST
+  fail when Redis refuses it rather than printing the refusal in the column where
+  a length goes. On staging the env var does not exist (compose interpolates the
+  password into `command:`) and redis-server rewrites its own argv, so
+  `/proc/1/cmdline` has lost it: reading only the env var made every queue come
+  back as `NOAUTH Authentication required`.
 - **FR-009**: Output MUST be capped (20,000 characters) and say so when it
   truncates.
 - **FR-010**: Every command MUST assert the Docker daemon is reachable before

@@ -192,17 +192,42 @@ def test_parse_consumed_queues_lee_los_q_reales() -> None:
     }
 
 
+def test_una_tarea_en_varias_colas_no_esconde_la_muerta() -> None:
+    """La cola muerta se reporta aunque la tarea también vaya a una viva.
+
+    Medido contra staging el 2026-09-23: `cleanup_orphan_temp_files` tiene tres
+    entradas de beat, una por cola de colector. Con el mapa `tarea -> UNA cola`
+    sobrevivía sólo la última, así que si la muerta no era la última quedaba
+    invisible, y el resultado dependía del orden del dict. Por eso el mapa es
+    `tarea -> LISTA de colas`.
+    """
+    despachadas = json.dumps(
+        {
+            "openarg.cleanup_orphan_temp_files": [
+                "collector",
+                "collector-heavy",
+                "collector-heavy-retry",
+            ]
+        }
+    )
+    consumidas = {"w-collector": ["collector"], "w-retry": ["collector-heavy-retry"]}
+
+    resultado = ops_core.find_orphan_routes(despachadas, consumidas)
+
+    assert resultado["orphan_routes"] == {"openarg.cleanup_orphan_temp_files": ["collector-heavy"]}
+
+
 def test_find_orphan_routes_nombra_la_tarea_huerfana() -> None:
     """SC-001, con la forma exacta del incidente del 2026-09-09."""
     despachadas = json.dumps(
         {
-            "openarg.recover_stuck_tasks": "default",
-            "openarg.bulk_collect_all": "orchestrator",
-            "openarg.collect_dataset": "collector",
+            "openarg.recover_stuck_tasks": ["default"],
+            "openarg.bulk_collect_all": ["orchestrator"],
+            "openarg.collect_dataset": ["collector"],
         }
     )
     resultado = ops_core.find_orphan_routes(despachadas, ops_core.parse_consumed_queues(_COMANDOS))
-    assert resultado["orphan_routes"] == {"openarg.recover_stuck_tasks": "default"}
+    assert resultado["orphan_routes"] == {"openarg.recover_stuck_tasks": ["default"]}
     assert "default" not in resultado["consumed_queues"]  # type: ignore[operator]
     assert "orchestrator" in resultado["consumed_queues"]  # type: ignore[operator]
 
@@ -213,28 +238,55 @@ def test_find_orphan_routes_no_inventa_un_verde() -> None:
         ops_core.find_orphan_routes('{"error": "no running worker or beat container"}', {})
 
 
-def test_el_snippet_de_rutas_respeta_la_precedencia_de_celery() -> None:
-    """`options.queue` del beat pisa `task_routes`, igual que en
-    `test_celery_queues_have_consumers._colas_despachadas`. Se ejecuta el
-    snippet de verdad contra el `celery_app` del checkout.
-    """
+def _rutas_del_snippet() -> dict[str, list[str]]:
     import contextlib
     import io
-
-    from app.infrastructure.celery.app import celery_app
 
     salida = io.StringIO()
     with contextlib.redirect_stdout(salida):
         exec(ops_core._ROUTES_SNIPPET, {})  # noqa: S102 - el snippet es una constante del repo
-    rutas = json.loads(salida.getvalue())
+    rutas: dict[str, list[str]] = json.loads(salida.getvalue())
+    return rutas
 
-    esperado: dict[str, str] = {}
-    for tarea, ruta in (celery_app.conf.task_routes or {}).items():
-        if isinstance(ruta, dict) and ruta.get("queue"):
-            esperado[tarea] = ruta["queue"]
+
+def test_el_snippet_de_rutas_respeta_la_precedencia_de_celery() -> None:
+    """El beat pisa `task_routes`, pero por TAREA, no por entrada.
+
+    Se ejecuta el snippet de verdad contra el `celery_app` del checkout. El
+    esperado se arma acá con conjuntos: una tarea con varias entradas de beat
+    se despacha a todas sus colas.
+    """
+    from app.infrastructure.celery.app import celery_app
+
+    esperado: dict[str, set[str]] = {}
+    agendadas: set[str] = set()
     for entrada in (celery_app.conf.beat_schedule or {}).values():
         cola = (entrada.get("options") or {}).get("queue")
         if cola:
-            esperado[entrada["task"]] = cola
-    assert rutas == esperado
+            agendadas.add(entrada["task"])
+            esperado.setdefault(entrada["task"], set()).add(cola)
+    for tarea, ruta in (celery_app.conf.task_routes or {}).items():
+        if isinstance(ruta, dict) and ruta.get("queue") and tarea not in agendadas:
+            esperado.setdefault(tarea, set()).add(ruta["queue"])
+
+    rutas = _rutas_del_snippet()
+
+    assert rutas == {t: sorted(q) for t, q in esperado.items()}
     assert rutas, "el snippet devolvió un mapa vacío"
+
+
+def test_el_snippet_no_colapsa_una_tarea_agendada_en_varias_colas() -> None:
+    """El caso concreto que destapó la corrida contra staging.
+
+    `cleanup_orphan_temp_files` está agendada en las tres colas de colector
+    (PR #61). El snippet tiene que devolver las tres: con el mapa viejo
+    `tarea -> UNA cola` devolvía una sola y `collector-heavy` no aparecía en
+    ningún lado del informe.
+    """
+    rutas = _rutas_del_snippet()
+
+    assert rutas["openarg.cleanup_orphan_temp_files"] == [
+        "collector",
+        "collector-heavy",
+        "collector-heavy-retry",
+    ]

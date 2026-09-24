@@ -51,11 +51,17 @@ the other half of the comparison.
 1. `ops_core.py` + unit tests (validators, `redact`, `-Q` parsing, orphan diff).
 2. `server.py`, exercised end-to-end against `OPENARG_OPS_TARGET=local`.
 3. `README.md` with the registration command.
-4. First run against staging by someone who holds the key; fix whatever the real
-   compose layout contradicts.
+4. ~~First run against staging~~ **DONE 2026-09-23.** All six tools ran against
+   `staging.openarg.org`. It cost three bugs, each one a thing the local daemon
+   could not have shown:
+   - Docker unreachable produced an empty result and exit 0 (FR-010).
+   - A task on several queues collapsed to one (FR-008a).
+   - Redis auth: the password is in neither the container's env nor its argv
+     (FR-011).
 
-Step 4 is listed because it has not happened: every command was verified against
-a local Docker daemon, not against the server.
+   Everything else held: zero orphan routes on the server, `worker_ingest`
+   consuming `ingest,orchestrator`, and `compose_location` reporting
+   `/opt/docker/openarg` as unversioned.
 
 ## Rollout
 
