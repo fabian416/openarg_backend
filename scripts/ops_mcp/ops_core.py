@@ -146,11 +146,12 @@ for d in $(docker ps --format '{{.Label "com.docker.compose.project.working_dir"
     echo "git: NO - this directory is not versioned"
   fi
   echo "files:"; ls -1A "$d" 2>/dev/null | sed 's/^/  /'
-  for f in "$d"/.env "$d"/.env.*; do
-    [ -f "$f" ] || continue
-    echo "variable names in $(basename "$f"):"
-    grep -vE '^[[:space:]]*(#|$)' "$f" | cut -d= -f1 | sort | tr '\n' ' '; echo
-  done
+  if [ -f "$d/.env" ]; then
+    echo "variable names in .env:"
+    grep -vE '^[[:space:]]*(#|$)' "$d/.env" | cut -d= -f1 | sort | tr '\n' ' '; echo
+  fi
+  n="$(ls -1 "$d"/.env.* 2>/dev/null | wc -l | tr -d ' ')"
+  [ "$n" = "0" ] || echo "($n backups de .env, no listados)"
 done
 """,
     "logs": r"""

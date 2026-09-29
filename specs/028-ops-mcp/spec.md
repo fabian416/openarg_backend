@@ -1,7 +1,7 @@
 # Spec 028 — Ops MCP: reading what actually runs
 
 **Status**: Draft · **Owner**: backend
-**Last synced with code**: 2026-09-23
+**Last synced with code**: 2026-09-29
 **Supersedes nothing. Extends**: 009-monitoring, 012-admin
 
 ---
@@ -74,7 +74,10 @@ container, no application code imports it, and it adds no dependency to
   blocks, and known token shapes (`oarg_sk_`, `svc_`, `sk-ant-`, `AKIA`, `AIza`,
   `Bearer`) are replaced by `[REDACTED]`.
 - **FR-005**: The server MUST NOT read the *values* of any environment file on
-  the target. It MAY list variable *names*.
+  the target. It MAY list variable *names*, and only those of the `.env` the
+  environment actually runs on. Backups (`.env.bak-*`) are counted, not listed:
+  prod holds five, so listing them repeated ~35 names five times and buried the
+  one set that answers the question.
 - **FR-006**: The target MUST come from `OPENARG_OPS_TARGET` and the key path from
   `OPENARG_OPS_SSH_KEY`. Neither has a default, and no host, IP or key path is
   committed to this repo.
